@@ -15,6 +15,7 @@
 #include <format_number.h>
 #include <moustache.h>
 #include <settings.h>
+#include "WiFiHandle.hpp"
 
 // HTML files
 extern const char index_html_min_start[] asm("_binary_html_index_min_html_start");
@@ -377,6 +378,7 @@ void setup()
 #ifdef USER_LED_GPIO
   iotWebConf.setStatusPin(USER_LED_GPIO, USER_LED_ON_LEVEL);
 #endif
+  iotWebConf.setWifiConnectionHandler(staticIPHandle);
   iotWebConf.init();
 
   // Try to initialize 3 times

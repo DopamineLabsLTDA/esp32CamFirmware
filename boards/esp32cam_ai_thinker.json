@@ -1,6 +1,6 @@
 {
   "build": {
-    "arduino":{
+    "arduino": {
       "ldscript": "esp32_out.ld",
       "partitions": "huge_app.csv"
     },
@@ -32,7 +32,10 @@
       "'-D CAMERA_CONFIG_LEDC_CHANNEL=LEDC_CHANNEL_0'",
       "'-D CAMERA_CONFIG_FB_COUNT=2'",
       "'-D CAMERA_CONFIG_FB_LOCATION=CAMERA_FB_IN_PSRAM'",
-      "'-D SCCB_I2C_PORT=I2C_NUM_0'"
+      "'-D SCCB_I2C_PORT=I2C_NUM_0'",
+      "'-D REXBACK_IP = 192, 168, 0, 44'",
+      "'-D REXBACK_GATE = 192, 168, 0, 1'",
+      "'-D REXBACK_MASK = 255, 255, 255, 0'"
     ],
     "f_cpu": "240000000L",
     "f_flash": "40000000L",
