@@ -1,9 +1,11 @@
 #include <Arduino.h>
+#include <ArduinoJson.h>
 #include <esp_wifi.h>
 #include <soc/rtc_cntl_reg.h>
 #include <driver/i2c.h>
 #include <IotWebConf.h>
 #include <IotWebConfTParameter.h>
+#include <IotWebConfUsing.h>
 #include <OV2640.h>
 #include <ESPmDNS.h>
 #include <rtsp_server.h>
@@ -15,7 +17,29 @@
 #include <format_number.h>
 #include <moustache.h>
 #include <settings.h>
-#include "WiFiHandle.hpp"
+
+
+#ifndef REXBACK_IP
+#define REXBACK_IP "192.168.0.50"
+#endif
+
+#ifndef REXBACK_GATE
+#define REXBACK_GATE "192.168.0.1"
+#endif
+
+#ifndef REXBACK_MASK
+#define REXBACK_MASK "255.255.255.0"
+#endif
+
+#define REXBACK_SSID "Lab.REMOTO"
+#define REXBACK_PASS "Laboratorio.REMOTO130"
+
+
+void staticIPHandle(const char* ssid, const char* password);
+iotwebconf::WifiAuthInfo* failedHandler();
+
+
+int failed_connection_counter = 0;
 
 // HTML files
 extern const char index_html_min_start[] asm("_binary_html_index_min_html_start");
@@ -46,6 +70,17 @@ auto param_hmirror = iotwebconf::Builder<iotwebconf::CheckboxTParameter>("hm").l
 auto param_vflip = iotwebconf::Builder<iotwebconf::CheckboxTParameter>("vm").label("Vertical mirror").defaultValue(DEFAULT_VERTICAL_MIRROR).build();
 auto param_dcw = iotwebconf::Builder<iotwebconf::CheckboxTParameter>("dcw").label("Downsize enable").defaultValue(DEFAULT_DCW).build();
 auto param_colorbar = iotwebconf::Builder<iotwebconf::CheckboxTParameter>("cb").label("Colorbar").defaultValue(DEFAULT_COLORBAR).build();
+
+// WiFi Connection parameters
+#define STRING_LENGTH 128
+char ipAddressValue[STRING_LENGTH];
+char gatewayValue[STRING_LENGTH];
+char maskValue[STRING_LENGTH];
+
+auto param_config_group = IotWebConfParameterGroup("conn", "Connection parameters");
+auto param_ip_address = IotWebConfTextParameter("IP Address", "ipAddress", ipAddressValue, STRING_LENGTH, REXBACK_IP, REXBACK_IP, "");
+auto param_gateway = IotWebConfTextParameter("Gateway", "gateway", gatewayValue, STRING_LENGTH, "", nullptr, "");
+auto param_mask = IotWebConfTextParameter("Mask", "netmask", maskValue, STRING_LENGTH, "", nullptr, "");
 
 // Camera
 OV2640 cam;
@@ -345,6 +380,11 @@ void setup()
   if (CAMERA_CONFIG_FB_LOCATION == CAMERA_FB_IN_PSRAM && !psramInit())
     log_e("Failed to initialize PSRAM");
 
+  param_config_group.addItem(&param_ip_address);
+  param_config_group.addItem(&param_gateway);
+  param_config_group.addItem(&param_mask);
+  iotWebConf.addParameterGroup(&param_config_group);
+
   param_group_camera.addItem(&param_frame_duration);
   param_group_camera.addItem(&param_frame_size);
   param_group_camera.addItem(&param_jpg_quality);
@@ -379,6 +419,7 @@ void setup()
   iotWebConf.setStatusPin(USER_LED_GPIO, USER_LED_ON_LEVEL);
 #endif
   iotWebConf.setWifiConnectionHandler(staticIPHandle);
+  iotWebConf.setWifiConnectionFailedHandler(failedHandler);
   iotWebConf.init();
 
   // Try to initialize 3 times
@@ -415,4 +456,37 @@ void loop()
 
   if (camera_server)
     camera_server->doLoop();
+}
+
+void staticIPHandle(const char* ssid, const char* password)
+{
+    IPAddress local_IP;
+    IPAddress gateway;
+    IPAddress subnet;
+    local_IP.fromString(param_ip_address.valueBuffer);
+    gateway.fromString(param_gateway.valueBuffer);
+    subnet.fromString(param_mask.valueBuffer);
+
+    // WiFi connection
+    WiFi.begin(ssid, password);
+    WiFi.config(local_IP, gateway, subnet);
+
+}
+
+iotwebconf::WifiAuthInfo* failedHandler()
+{
+  iotwebconf::WifiAuthInfo* return_struct = nullptr;
+  if(failed_connection_counter == 3)
+  {
+    failed_connection_counter = 0;
+    return return_struct;
+  }
+
+  // Try defaults
+  return_struct = new iotwebconf::WifiAuthInfo;
+  return_struct->ssid = REXBACK_SSID;
+  return_struct->password = REXBACK_PASS;
+  failed_connection_counter +=1;
+  return return_struct;
+
 }
