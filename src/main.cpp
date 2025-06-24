@@ -18,6 +18,12 @@
 #include <moustache.h>
 #include <settings.h>
 
+// #ifndef ESP32
+// #include <LittleFS.h>
+// #else
+#include <LITTLEFS.h>
+#define LittleFS LITTLEFS
+// #endif
 
 #ifndef REXBACK_IP
 #define REXBACK_IP "192.168.0.50"
@@ -34,10 +40,14 @@
 #define REXBACK_SSID "Lab.REMOTO"
 #define REXBACK_PASS "Laboratorio.REMOTO130"
 
+#define REXBACK_JSON "/config.json"
+#define STRING_LEN 128
+#define NUMBER_LEN 32
+#define JSON_FILE_MAX_SIZE 512
 
-void staticIPHandle(const char* ssid, const char* password);
-iotwebconf::WifiAuthInfo* failedHandler();
-
+void staticIPHandle(const char *ssid, const char *password);
+void readConfigFile();
+// iotwebconf::WifiAuthInfo* failedHandler();
 
 int failed_connection_counter = 0;
 
@@ -79,8 +89,8 @@ char maskValue[STRING_LENGTH];
 
 auto param_config_group = IotWebConfParameterGroup("conn", "Connection parameters");
 auto param_ip_address = IotWebConfTextParameter("IP Address", "ipAddress", ipAddressValue, STRING_LENGTH, REXBACK_IP, REXBACK_IP, "");
-auto param_gateway = IotWebConfTextParameter("Gateway", "gateway", gatewayValue, STRING_LENGTH, "", nullptr, "");
-auto param_mask = IotWebConfTextParameter("Mask", "netmask", maskValue, STRING_LENGTH, "", nullptr, "");
+auto param_gateway = IotWebConfTextParameter("Gateway", "gateway", gatewayValue, STRING_LENGTH, REXBACK_GATE, REXBACK_GATE, "");
+auto param_mask = IotWebConfTextParameter("Mask", "netmask", maskValue, STRING_LENGTH, REXBACK_MASK, REXBACK_MASK, "");
 
 // Camera
 OV2640 cam;
@@ -255,35 +265,35 @@ esp_err_t initialize_camera()
   auto jpeg_quality = param_jpg_quality.value();
   log_i("Frame duration: %d ms", param_frame_duration.value());
   const camera_config_t camera_config = {
-    .pin_pwdn = CAMERA_CONFIG_PIN_PWDN,         // GPIO pin for camera power down line
-    .pin_reset = CAMERA_CONFIG_PIN_RESET,       // GPIO pin for camera reset line
-    .pin_xclk = CAMERA_CONFIG_PIN_XCLK,         // GPIO pin for camera XCLK line
-    .pin_sccb_sda = CAMERA_CONFIG_PIN_SCCB_SDA, // GPIO pin for camera SDA line
-    .pin_sccb_scl = CAMERA_CONFIG_PIN_SCCB_SCL, // GPIO pin for camera SCL line
-    .pin_d7 = CAMERA_CONFIG_PIN_Y9,             // GPIO pin for camera D7 line
-    .pin_d6 = CAMERA_CONFIG_PIN_Y8,             // GPIO pin for camera D6 line
-    .pin_d5 = CAMERA_CONFIG_PIN_Y7,             // GPIO pin for camera D5 line
-    .pin_d4 = CAMERA_CONFIG_PIN_Y6,             // GPIO pin for camera D4 line
-    .pin_d3 = CAMERA_CONFIG_PIN_Y5,             // GPIO pin for camera D3 line
-    .pin_d2 = CAMERA_CONFIG_PIN_Y4,             // GPIO pin for camera D2 line
-    .pin_d1 = CAMERA_CONFIG_PIN_Y3,             // GPIO pin for camera D1 line
-    .pin_d0 = CAMERA_CONFIG_PIN_Y2,             // GPIO pin for camera D0 line
-    .pin_vsync = CAMERA_CONFIG_PIN_VSYNC,       // GPIO pin for camera VSYNC line
-    .pin_href = CAMERA_CONFIG_PIN_HREF,         // GPIO pin for camera HREF line
-    .pin_pclk = CAMERA_CONFIG_PIN_PCLK,         // GPIO pin for camera PCLK line
-    .xclk_freq_hz = CAMERA_CONFIG_CLK_FREQ_HZ,  // Frequency of XCLK signal, in Hz. EXPERIMENTAL: Set to 16MHz on ESP32-S2 or ESP32-S3 to enable EDMA mode
-    .ledc_timer = CAMERA_CONFIG_LEDC_TIMER,     // LEDC timer to be used for generating XCLK
-    .ledc_channel = CAMERA_CONFIG_LEDC_CHANNEL, // LEDC channel to be used for generating XCLK
-    .pixel_format = PIXFORMAT_JPEG,             // Format of the pixel data: PIXFORMAT_ + YUV422|GRAYSCALE|RGB565|JPEG
-    .frame_size = frame_size,                   // Size of the output image: FRAMESIZE_ + QVGA|CIF|VGA|SVGA|XGA|SXGA|UXGA
-    .jpeg_quality = jpeg_quality,               // Quality of JPEG output. 0-63 lower means higher quality
-    .fb_count = CAMERA_CONFIG_FB_COUNT,         // Number of frame buffers to be allocated. If more than one, then each frame will be acquired (double speed)
-    .fb_location = CAMERA_CONFIG_FB_LOCATION,   // The location where the frame buffer will be allocated
-    .grab_mode = CAMERA_GRAB_LATEST,            // When buffers should be filled
+      .pin_pwdn = CAMERA_CONFIG_PIN_PWDN,         // GPIO pin for camera power down line
+      .pin_reset = CAMERA_CONFIG_PIN_RESET,       // GPIO pin for camera reset line
+      .pin_xclk = CAMERA_CONFIG_PIN_XCLK,         // GPIO pin for camera XCLK line
+      .pin_sccb_sda = CAMERA_CONFIG_PIN_SCCB_SDA, // GPIO pin for camera SDA line
+      .pin_sccb_scl = CAMERA_CONFIG_PIN_SCCB_SCL, // GPIO pin for camera SCL line
+      .pin_d7 = CAMERA_CONFIG_PIN_Y9,             // GPIO pin for camera D7 line
+      .pin_d6 = CAMERA_CONFIG_PIN_Y8,             // GPIO pin for camera D6 line
+      .pin_d5 = CAMERA_CONFIG_PIN_Y7,             // GPIO pin for camera D5 line
+      .pin_d4 = CAMERA_CONFIG_PIN_Y6,             // GPIO pin for camera D4 line
+      .pin_d3 = CAMERA_CONFIG_PIN_Y5,             // GPIO pin for camera D3 line
+      .pin_d2 = CAMERA_CONFIG_PIN_Y4,             // GPIO pin for camera D2 line
+      .pin_d1 = CAMERA_CONFIG_PIN_Y3,             // GPIO pin for camera D1 line
+      .pin_d0 = CAMERA_CONFIG_PIN_Y2,             // GPIO pin for camera D0 line
+      .pin_vsync = CAMERA_CONFIG_PIN_VSYNC,       // GPIO pin for camera VSYNC line
+      .pin_href = CAMERA_CONFIG_PIN_HREF,         // GPIO pin for camera HREF line
+      .pin_pclk = CAMERA_CONFIG_PIN_PCLK,         // GPIO pin for camera PCLK line
+      .xclk_freq_hz = CAMERA_CONFIG_CLK_FREQ_HZ,  // Frequency of XCLK signal, in Hz. EXPERIMENTAL: Set to 16MHz on ESP32-S2 or ESP32-S3 to enable EDMA mode
+      .ledc_timer = CAMERA_CONFIG_LEDC_TIMER,     // LEDC timer to be used for generating XCLK
+      .ledc_channel = CAMERA_CONFIG_LEDC_CHANNEL, // LEDC channel to be used for generating XCLK
+      .pixel_format = PIXFORMAT_JPEG,             // Format of the pixel data: PIXFORMAT_ + YUV422|GRAYSCALE|RGB565|JPEG
+      .frame_size = frame_size,                   // Size of the output image: FRAMESIZE_ + QVGA|CIF|VGA|SVGA|XGA|SXGA|UXGA
+      .jpeg_quality = jpeg_quality,               // Quality of JPEG output. 0-63 lower means higher quality
+      .fb_count = CAMERA_CONFIG_FB_COUNT,         // Number of frame buffers to be allocated. If more than one, then each frame will be acquired (double speed)
+      .fb_location = CAMERA_CONFIG_FB_LOCATION,   // The location where the frame buffer will be allocated
+      .grab_mode = CAMERA_GRAB_LATEST,            // When buffers should be filled
 #if CONFIG_CAMERA_CONVERTER_ENABLED
-    conv_mode = CONV_DISABLE, // RGB<->YUV Conversion mode
+      conv_mode = CONV_DISABLE, // RGB<->YUV Conversion mode
 #endif
-    .sccb_i2c_port = SCCB_I2C_PORT // If pin_sccb_sda is -1, use the already configured I2C bus by number
+      .sccb_i2c_port = SCCB_I2C_PORT // If pin_sccb_sda is -1, use the already configured I2C bus by number
   };
 
   return cam.init(camera_config);
@@ -419,8 +429,9 @@ void setup()
   iotWebConf.setStatusPin(USER_LED_GPIO, USER_LED_ON_LEVEL);
 #endif
   iotWebConf.setWifiConnectionHandler(staticIPHandle);
-  iotWebConf.setWifiConnectionFailedHandler(failedHandler);
+  // iotWebConf.setWifiConnectionFailedHandler(failedHandler);
   iotWebConf.init();
+  readConfigFile();
 
   // Try to initialize 3 times
   for (auto i = 0; i < 3; i++)
@@ -458,35 +469,68 @@ void loop()
     camera_server->doLoop();
 }
 
-void staticIPHandle(const char* ssid, const char* password)
+void staticIPHandle(const char *ssid, const char *password)
 {
-    IPAddress local_IP;
-    IPAddress gateway;
-    IPAddress subnet;
-    local_IP.fromString(param_ip_address.valueBuffer);
-    gateway.fromString(param_gateway.valueBuffer);
-    subnet.fromString(param_mask.valueBuffer);
+  IPAddress local_IP;
+  IPAddress gateway;
+  IPAddress subnet;
+  local_IP.fromString(param_ip_address.valueBuffer);
+  gateway.fromString(param_gateway.valueBuffer);
+  subnet.fromString(param_mask.valueBuffer);
 
-    // WiFi connection
-    WiFi.begin(ssid, password);
-    WiFi.config(local_IP, gateway, subnet);
-
+  // WiFi connection
+  WiFi.begin(ssid, password);
+  WiFi.config(local_IP, gateway, subnet);
 }
 
-iotwebconf::WifiAuthInfo* failedHandler()
+// iotwebconf::WifiAuthInfo* failedHandler()
+// {
+//   iotwebconf::WifiAuthInfo* return_struct = nullptr;
+//   if(failed_connection_counter == 3)
+//   {
+//     failed_connection_counter = 0;
+//     return return_struct;
+//   }
+
+//   // Try defaults
+//   return_struct = new iotwebconf::WifiAuthInfo;
+//   return_struct->ssid = REXBACK_SSID;
+//   return_struct->password = REXBACK_PASS;
+//   failed_connection_counter +=1;
+//   return return_struct;
+
+// }
+
+void readConfigFile()
 {
-  iotwebconf::WifiAuthInfo* return_struct = nullptr;
-  if(failed_connection_counter == 3)
+  LittleFS.begin();
+  File configFile = LittleFS.open(REXBACK_JSON, "r");
+  if (configFile)
   {
-    failed_connection_counter = 0;
-    return return_struct;
+    Serial.println(F("Reading config file"));
+    StaticJsonDocument<JSON_FILE_MAX_SIZE> doc;
+
+    DeserializationError error = deserializeJson(doc, configFile);
+    configFile.close();
+
+    if (error)
+    {
+      Serial.println(F("Failed to read file, using default configuration"));
+      return;
+    }
+    JsonObject documentRoot = doc.as<JsonObject>();
+
+    // -- Apply JSON configuration.
+    iotWebConf.getRootParameterGroup()->loadFromJson(documentRoot);
+    iotWebConf.saveConfig();
+
+    // -- Remove file after finished loading it.
+    LittleFS.remove(REXBACK_JSON);
+  }
+  else
+  {
+    Serial.println(F("Config file not found, skipping."));
   }
 
-  // Try defaults
-  return_struct = new iotwebconf::WifiAuthInfo;
-  return_struct->ssid = REXBACK_SSID;
-  return_struct->password = REXBACK_PASS;
-  failed_connection_counter +=1;
-  return return_struct;
-
+  LittleFS.end();
 }
