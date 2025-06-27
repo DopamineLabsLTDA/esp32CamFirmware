@@ -5,8 +5,8 @@
             "iwcApPassword": "rexcamera",
             "iwcApTimeout": "30",
             "iwcWifi0": {
-                "iwcWifiSsid": "Cosmocon",
-                "iwcWifiPassword": "wr8tr@hujU-hute"
+                "iwcWifiSsid": "",
+                "iwcWifiPassword": ""
             }
         },
         "iwcCustom": {
