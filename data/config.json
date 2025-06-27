@@ -1,0 +1,25 @@
+{
+    "iwcAll": {
+        "iwcSys": {
+            "iwcThingName": "rexCamera-ESP32",
+            "iwcApPassword": "rexcamera",
+            "iwcApTimeout": "30",
+            "iwcWifi0": {
+                "iwcWifiSsid": "",
+                "iwcWifiPassword": ""
+            }
+        },
+        "iwcCustom": {
+            "conn": {
+                "ipAddress": "192.168.0.44",
+                "gateway": "192.168.0.1",
+                "netmask": "255.255.255.0"
+            },
+            "camera": {
+                "fd": "10",
+                "fs": "HD (1280x720)",
+                "q": "14"
+            }
+        }
+    }
+}
