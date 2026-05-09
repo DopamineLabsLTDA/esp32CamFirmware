@@ -169,7 +169,7 @@ Install the [Platform IO extension for VS Code](https://marketplace.visualstudio
 
 ![platform_io_tasks_menu](figures/platform_io_options.png)
 
-3. From the `General` submenu_
+3. From the `General` submenu:
     - Select `Build` to compile the firmware.
     - Select `Upload and Monitor` to flash the device and monitor the status prints. 
 
