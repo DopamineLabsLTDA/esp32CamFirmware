@@ -90,7 +90,7 @@ iotWebConf.addParameterGroup(&param_config_group); // This adds the configuratio
 ```
 To store the configuration onto memory, LittleFS was used to write the JSON file onto flash. 
 
->![WARNING]
+>[!WARNING]
 > At the point of writing this, the latest version of the LittleFS from the [lorol repo](https://github.com/lorol/LITTLEFS) 1.0.6, nevertheless this version had problems reported when performing certain operations, so version 1.0.5 was used instead, is critical to respect the version used and not the latest one. 
 
 ```cpp
