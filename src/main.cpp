@@ -18,13 +18,11 @@
 #include <moustache.h>
 #include <settings.h>
 
-// #ifndef ESP32
-// #include <LittleFS.h>
-// #else
+// [Addition] Imports to handle flashing the JSON onto memory.
 #include <LITTLEFS.h>
 #define LittleFS LITTLEFS
-// #endif
 
+// [Addition] Default values for network settings
 #ifndef REXBACK_IP
 #define REXBACK_IP "192.168.0.50"
 #endif
@@ -45,11 +43,13 @@
 #define NUMBER_LEN 32
 #define JSON_FILE_MAX_SIZE 512
 
+/// @brief Allows to configure the WiFi connection, setting a static IP, gateway and netmask. 
+/// @param ssid The network ssid.
+/// @param password The network password.
 void staticIPHandle(const char *ssid, const char *password);
-void readConfigFile();
-// iotwebconf::WifiAuthInfo* failedHandler();
 
-int failed_connection_counter = 0;
+/// @brief Loads the default configurations from the JSON in memory.
+void readConfigFile();
 
 // HTML files
 extern const char index_html_min_start[] asm("_binary_html_index_min_html_start");
@@ -81,12 +81,11 @@ auto param_vflip = iotwebconf::Builder<iotwebconf::CheckboxTParameter>("vm").lab
 auto param_dcw = iotwebconf::Builder<iotwebconf::CheckboxTParameter>("dcw").label("Downsize enable").defaultValue(DEFAULT_DCW).build();
 auto param_colorbar = iotwebconf::Builder<iotwebconf::CheckboxTParameter>("cb").label("Colorbar").defaultValue(DEFAULT_COLORBAR).build();
 
-// WiFi Connection parameters
+// [addition] WiFi Connection parameters
 #define STRING_LENGTH 128
 char ipAddressValue[STRING_LENGTH];
 char gatewayValue[STRING_LENGTH];
 char maskValue[STRING_LENGTH];
-
 auto param_config_group = IotWebConfParameterGroup("conn", "Connection parameters");
 auto param_ip_address = IotWebConfTextParameter("IP Address", "ipAddress", ipAddressValue, STRING_LENGTH, REXBACK_IP, REXBACK_IP, "");
 auto param_gateway = IotWebConfTextParameter("Gateway", "gateway", gatewayValue, STRING_LENGTH, REXBACK_GATE, REXBACK_GATE, "");
@@ -390,6 +389,7 @@ void setup()
   if (CAMERA_CONFIG_FB_LOCATION == CAMERA_FB_IN_PSRAM && !psramInit())
     log_e("Failed to initialize PSRAM");
 
+  // [addition] Adding the network configuration group to the parameters
   param_config_group.addItem(&param_ip_address);
   param_config_group.addItem(&param_gateway);
   param_config_group.addItem(&param_mask);
@@ -428,8 +428,8 @@ void setup()
 #ifdef USER_LED_GPIO
   iotWebConf.setStatusPin(USER_LED_GPIO, USER_LED_ON_LEVEL);
 #endif
+  // [addition] Pass the network configuration to the iotWebConf. 
   iotWebConf.setWifiConnectionHandler(staticIPHandle);
-  // iotWebConf.setWifiConnectionFailedHandler(failedHandler);
   iotWebConf.init();
   readConfigFile();
 
@@ -482,24 +482,6 @@ void staticIPHandle(const char *ssid, const char *password)
   WiFi.begin(ssid, password);
   WiFi.config(local_IP, gateway, subnet);
 }
-
-// iotwebconf::WifiAuthInfo* failedHandler()
-// {
-//   iotwebconf::WifiAuthInfo* return_struct = nullptr;
-//   if(failed_connection_counter == 3)
-//   {
-//     failed_connection_counter = 0;
-//     return return_struct;
-//   }
-
-//   // Try defaults
-//   return_struct = new iotwebconf::WifiAuthInfo;
-//   return_struct->ssid = REXBACK_SSID;
-//   return_struct->password = REXBACK_PASS;
-//   failed_connection_counter +=1;
-//   return return_struct;
-
-// }
 
 void readConfigFile()
 {
