@@ -145,7 +145,7 @@ This file setups the default configuration after flashing, allowing the user to 
 
 **More variables, from the available parameter could also be assigned default values, and defined in the config.json file.**
 
->![INFO]
+>[!INFO]
 >The configurations for the camera were iteratively tested for performance, yielding the values on the config.json file. Changing these default values could result in lower performance.  
 
 
