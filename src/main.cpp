@@ -1,14 +1,14 @@
 #include <Arduino.h>
-#include <ArduinoJson.h>
 #include <esp_wifi.h>
 #include <soc/rtc_cntl_reg.h>
-#include <driver/i2c.h>
 #include <IotWebConf.h>
+#include <string>
+#include <esp_random.h>
 #include <IotWebConfTParameter.h>
-#include <IotWebConfUsing.h>
-#include <OV2640.h>
 #include <ESPmDNS.h>
-#include <rtsp_server.h>
+#include <ArduinoOTA.h>
+#include <Update.h>
+#include <esp_ota_ops.h>
 #include <lookup_camera_effect.h>
 #include <lookup_camera_frame_size.h>
 #include <lookup_camera_gainceiling.h>
@@ -18,32 +18,17 @@
 #include <moustache.h>
 #include <settings.h>
 
-// [Addition] Imports to handle flashing the JSON onto memory.
+#include <micro_rtsp_server.h>
+#include <micro_rtsp_source_video_camera.h>
+#include <micro_rtsp_source_audio_i2s.h>
+
 #include <LITTLEFS.h>
 #define LittleFS LITTLEFS
 
-// [Addition] Default values for network settings
-#ifndef REXBACK_IP
-#define REXBACK_IP "192.168.0.50"
-#endif
-
-#ifndef REXBACK_GATE
-#define REXBACK_GATE "192.168.0.1"
-#endif
-
-#ifndef REXBACK_MASK
-#define REXBACK_MASK "255.255.255.0"
-#endif
-
-#define REXBACK_SSID "Lab.REMOTO"
-#define REXBACK_PASS "Laboratorio.REMOTO130"
-
-#define REXBACK_JSON "/config.json"
-#define STRING_LEN 128
-#define NUMBER_LEN 32
+#define CONFIGURATION_JSON "/config.json"
 #define JSON_FILE_MAX_SIZE 512
 
-/// @brief Allows to configure the WiFi connection, setting a static IP, gateway and netmask. 
+/// @brief Allows to configure the WiFi connection, setting a static IP, gateway and netmask.
 /// @param ssid The network ssid.
 /// @param password The network password.
 void staticIPHandle(const char *ssid, const char *password);
@@ -81,30 +66,47 @@ auto param_vflip = iotwebconf::Builder<iotwebconf::CheckboxTParameter>("vm").lab
 auto param_dcw = iotwebconf::Builder<iotwebconf::CheckboxTParameter>("dcw").label("Downsize enable").defaultValue(DEFAULT_DCW).build();
 auto param_colorbar = iotwebconf::Builder<iotwebconf::CheckboxTParameter>("cb").label("Colorbar").defaultValue(DEFAULT_COLORBAR).build();
 
-// [addition] WiFi Connection parameters
+auto param_group_auth = iotwebconf::ParameterGroup("auth", "Authentication settings");
+auto param_auth_user = iotwebconf::Builder<iotwebconf::TextTParameter<16>>("au").label("Username").defaultValue("").build();
+auto param_auth_pass = iotwebconf::Builder<iotwebconf::PasswordTParameter<32>>("ap").label("Password").defaultValue("").build();
+
 #define STRING_LENGTH 128
 char ipAddressValue[STRING_LENGTH];
 char gatewayValue[STRING_LENGTH];
 char maskValue[STRING_LENGTH];
-auto param_config_group = IotWebConfParameterGroup("conn", "Connection parameters");
-auto param_ip_address = IotWebConfTextParameter("IP Address", "ipAddress", ipAddressValue, STRING_LENGTH, REXBACK_IP, REXBACK_IP, "");
-auto param_gateway = IotWebConfTextParameter("Gateway", "gateway", gatewayValue, STRING_LENGTH, REXBACK_GATE, REXBACK_GATE, "");
-auto param_mask = IotWebConfTextParameter("Mask", "netmask", maskValue, STRING_LENGTH, REXBACK_MASK, REXBACK_MASK, "");
+auto param_config_group = iotwebconf::ParameterGroup("conn", "Connection Settings");
+auto param_ip_address = iotwebconf::Builder<iotwebconf::TextTParameter<STRING_LENGTH>>("ipAddress").label("IP Address").defaultValue("").build();
+auto param_gateway = iotwebconf::Builder<iotwebconf::TextTParameter<STRING_LENGTH>>("gateway").label("Gateway").defaultValue("").build();
+auto param_mask = iotwebconf::Builder<iotwebconf::TextTParameter<STRING_LENGTH>>("netmask").label("Mask").defaultValue("").build();
 
-// Camera
-OV2640 cam;
 // DNS Server
 DNSServer dnsServer;
-// RTSP Server
-std::unique_ptr<rtsp_server> camera_server;
-// Web server
-WebServer web_server(80);
 
-auto thingName = String(WIFI_SSID) + "-" + String(ESP.getEfuseMac(), 16);
+// ESP32 Camera
+micro_rtsp_source_video_camera camera;
+
+#ifdef MIC_I2S_BCLK
+// Optional audio: capture from the onboard I2S MEMS microphone and stream it
+// as G.711 a-law together with the video (see boards/*.json for the pins).
+micro_rtsp_source_audio_i2s audio(MIC_I2S_BCLK, MIC_I2S_WS, MIC_I2S_DIN);
+micro_rtsp_server rtsp_server(DEFAULT_WWW_REALM, &camera, &audio);
+#else
+micro_rtsp_server rtsp_server(DEFAULT_WWW_REALM, &camera);
+#endif
+
+// Web server on port 80 for configuration and diagnostics. The RTSP server runs on port 554 (default) or the configured port.
+WebServer web_server;
+
+auto macAddress = String(ESP.getEfuseMac(), 16);
+// Format hostname format: esp32-<mac address>.local
+auto hostname = "esp32-" + macAddress + ".local";
+auto thingName = String(APP_TITLE) + "-" + macAddress;
+
+// IotWebConf instance for configuration portal and settings management
 IotWebConf iotWebConf(thingName.c_str(), &dnsServer, &web_server, WIFI_PASSWORD, CONFIG_VERSION);
 
-// Camera initialization result
-esp_err_t camera_init_result;
+// Camera initialization result (ESP_FAIL until the camera is initialized)
+esp_err_t camera_init_result = ESP_FAIL;
 
 void handle_root()
 {
@@ -113,15 +115,9 @@ void handle_root()
   if (iotWebConf.handleCaptivePortal())
     return;
 
-  // Format hostname
-  auto hostname = "esp32-" + WiFi.macAddress() + ".local";
-  hostname.replace(":", "");
-  hostname.toLowerCase();
-
   // Wifi Modes
   const char *wifi_modes[] = {"NULL", "STA", "AP", "STA+AP"};
   auto ipv4 = WiFi.getMode() == WIFI_MODE_AP ? WiFi.softAPIP() : WiFi.localIP();
-  auto ipv6 = WiFi.getMode() == WIFI_MODE_AP ? WiFi.softAPIPv6() : WiFi.localIPv6();
 
   auto initResult = esp_err_to_name(camera_init_result);
   if (initResult == nullptr)
@@ -145,15 +141,14 @@ void handle_root()
       {"Uptime", String(format_duration(millis() / 1000))},
       {"FreeHeap", format_memory(ESP.getFreeHeap())},
       {"MaxAllocHeap", format_memory(ESP.getMaxAllocHeap())},
-      {"NumRTSPSessions", camera_server != nullptr ? String(camera_server->num_connected()) : "RTSP server disabled"},
+      {"NumRTSPSessions", String(rtsp_server.clients())},
       // Network
       {"HostName", hostname},
-      {"MacAddress", WiFi.macAddress()},
+      {"MacAddress", macAddress},
       {"AccessPoint", WiFi.SSID()},
       {"SignalStrength", String(WiFi.RSSI())},
       {"WifiMode", wifi_modes[WiFi.getMode()]},
       {"IPv4", ipv4.toString()},
-      {"IPv6", ipv6.toString()},
       {"NetworkState.ApMode", String(iotWebConf.getState() == iotwebconf::NetworkState::ApMode)},
       {"NetworkState.OnLine", String(iotWebConf.getState() == iotwebconf::NetworkState::OnLine)},
       // Camera
@@ -188,12 +183,29 @@ void handle_root()
       {"Dcw", String(param_dcw.value())},
       {"ColorBar", String(param_colorbar.value())},
       // RTSP
-      {"RtspPort", String(RTSP_PORT)}};
+      {"RtspPort", String(rtsp_server.get_rtsp_port())},
+      {"AuthRequired", String(param_auth_user.value()[0] != '\0')},
+      // OTA
+      {"OtaSupported", String(esp_ota_get_next_update_partition(nullptr) != nullptr)}};
 
   web_server.sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
   auto html = moustache_render(index_html_min_start, substitutions);
   web_server.send(200, "text/html", html);
 }
+
+#ifdef FLASH_LED_GPIO
+void handle_flash()
+{
+  log_v("handle_flash");
+  // If no value present, use off, otherwise convert v to integer. Depends on analog resolution for max value
+  auto v = web_server.hasArg("v") ? web_server.arg("v").toInt() : 0;
+  // If conversion fails, v = 0
+  analogWrite(FLASH_LED_GPIO, v);
+
+  web_server.sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+  web_server.send(200);
+}
+#endif
 
 void handle_snapshot()
 {
@@ -207,10 +219,10 @@ void handle_snapshot()
   // Remove old images stored in the frame buffer
   auto frame_buffers = CAMERA_CONFIG_FB_COUNT;
   while (frame_buffers--)
-    cam.run();
+    camera.update();
 
-  auto fb_len = cam.getSize();
-  auto fb = (const char *)cam.getfb();
+  auto fb_len = camera.size();
+  auto fb = camera.data();
   if (fb == nullptr)
   {
     web_server.send(404, "text/plain", "Unable to obtain frame buffer from the camera");
@@ -220,10 +232,26 @@ void handle_snapshot()
   web_server.sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
   web_server.setContentLength(fb_len);
   web_server.send(200, "image/jpeg", "");
-  web_server.sendContent(fb, fb_len);
+  web_server.sendContent((const char *)fb, fb_len);
 }
 
-#define STREAM_CONTENT_BOUNDARY "123456789000000000000987654321"
+// Generate an RFC 2046 (5.1.1) compliant multipart boundary: 1-70 characters
+// from DIGIT/ALPHA plus a few punctuation marks. Built from esp_random() so it
+// is unique per stream connection and effectively never collides with the
+// bytes of an encapsulated JPEG frame.
+static std::string generate_stream_boundary()
+{
+  std::string boundary;
+  boundary.reserve(32);
+  static const char hex_digits[] = "0123456789abcdef";
+  for (auto i = 0; i < 8; ++i) // 8 random words -> 32 hex chars
+  {
+    const uint32_t r = esp_random();
+    for (auto j = 0; j < 4; ++j)
+      boundary += hex_digits[(r >> (j * 4)) & 0xf];
+  }
+  return boundary;
+}
 
 void handle_stream()
 {
@@ -235,23 +263,46 @@ void handle_stream()
   }
 
   log_v("starting streaming");
-  // Blocks further handling of HTTP server until stopped
-  char size_buf[12];
+  const std::string boundary = generate_stream_boundary();
+
+  // Pace frames to the configured frame interval and service the RTSP server
+  // and the web config/DNS/mDNS machinery between frames, so this handler
+  // does not block the rest of the firmware while the connection is open.
   auto client = web_server.client();
-  client.write("HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Type: multipart/x-mixed-replace; boundary=" STREAM_CONTENT_BOUNDARY "\r\n");
+  client.write(("HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Type: multipart/x-mixed-replace; boundary=" + boundary + "\r\n").c_str());
+
+  const auto frame_interval = rtsp_server.get_frame_interval();
+  unsigned long next_frame = 0;
   while (client.connected())
   {
-    client.write("\r\n--" STREAM_CONTENT_BOUNDARY "\r\n");
-    cam.run();
-    client.write("Content-Type: image/jpeg\r\nContent-Length: ");
-    sprintf(size_buf, "%d\r\n\r\n", cam.getSize());
-    client.write(size_buf);
-    client.write(cam.getfb(), cam.getSize());
+    auto now = millis();
+    if (now >= next_frame)
+    {
+      camera.update();
+      if (camera.data() != nullptr)
+      {
+        client.write(("\r\n--" + boundary + "\r\n").c_str());
+        client.write(("Content-Type: image/jpeg\r\nContent-Length: " + std::to_string(camera.size()) + "\r\n\r\n").c_str());
+        client.write(camera.data(), camera.size());
+      }
+      next_frame = now + frame_interval;
+    }
+
+    yield(); // Yield to the RTOS so other tasks can run while waiting for the next frame
+    // Keep RTSP streaming and the web config/DNS/mDNS loop alive while this HTTP connection is open.
+    loop();
   }
 
   log_v("client disconnected");
   client.stop();
   log_v("stopped streaming");
+}
+
+void handle_restart()
+{
+  log_v("handle_restart");
+  WiFi.disconnect(false, true);
+  ESP.restart();
 }
 
 esp_err_t initialize_camera()
@@ -263,43 +314,34 @@ esp_err_t initialize_camera()
   log_i("JPEG quality: %d", param_jpg_quality.value());
   auto jpeg_quality = param_jpg_quality.value();
   log_i("Frame duration: %d ms", param_frame_duration.value());
-  const camera_config_t camera_config = {
-      .pin_pwdn = CAMERA_CONFIG_PIN_PWDN,         // GPIO pin for camera power down line
-      .pin_reset = CAMERA_CONFIG_PIN_RESET,       // GPIO pin for camera reset line
-      .pin_xclk = CAMERA_CONFIG_PIN_XCLK,         // GPIO pin for camera XCLK line
-      .pin_sccb_sda = CAMERA_CONFIG_PIN_SCCB_SDA, // GPIO pin for camera SDA line
-      .pin_sccb_scl = CAMERA_CONFIG_PIN_SCCB_SCL, // GPIO pin for camera SCL line
-      .pin_d7 = CAMERA_CONFIG_PIN_Y9,             // GPIO pin for camera D7 line
-      .pin_d6 = CAMERA_CONFIG_PIN_Y8,             // GPIO pin for camera D6 line
-      .pin_d5 = CAMERA_CONFIG_PIN_Y7,             // GPIO pin for camera D5 line
-      .pin_d4 = CAMERA_CONFIG_PIN_Y6,             // GPIO pin for camera D4 line
-      .pin_d3 = CAMERA_CONFIG_PIN_Y5,             // GPIO pin for camera D3 line
-      .pin_d2 = CAMERA_CONFIG_PIN_Y4,             // GPIO pin for camera D2 line
-      .pin_d1 = CAMERA_CONFIG_PIN_Y3,             // GPIO pin for camera D1 line
-      .pin_d0 = CAMERA_CONFIG_PIN_Y2,             // GPIO pin for camera D0 line
-      .pin_vsync = CAMERA_CONFIG_PIN_VSYNC,       // GPIO pin for camera VSYNC line
-      .pin_href = CAMERA_CONFIG_PIN_HREF,         // GPIO pin for camera HREF line
-      .pin_pclk = CAMERA_CONFIG_PIN_PCLK,         // GPIO pin for camera PCLK line
-      .xclk_freq_hz = CAMERA_CONFIG_CLK_FREQ_HZ,  // Frequency of XCLK signal, in Hz. EXPERIMENTAL: Set to 16MHz on ESP32-S2 or ESP32-S3 to enable EDMA mode
-      .ledc_timer = CAMERA_CONFIG_LEDC_TIMER,     // LEDC timer to be used for generating XCLK
-      .ledc_channel = CAMERA_CONFIG_LEDC_CHANNEL, // LEDC channel to be used for generating XCLK
-      .pixel_format = PIXFORMAT_JPEG,             // Format of the pixel data: PIXFORMAT_ + YUV422|GRAYSCALE|RGB565|JPEG
-      .frame_size = frame_size,                   // Size of the output image: FRAMESIZE_ + QVGA|CIF|VGA|SVGA|XGA|SXGA|UXGA
-      .jpeg_quality = jpeg_quality,               // Quality of JPEG output. 0-63 lower means higher quality
-      .fb_count = CAMERA_CONFIG_FB_COUNT,         // Number of frame buffers to be allocated. If more than one, then each frame will be acquired (double speed)
-      .fb_location = CAMERA_CONFIG_FB_LOCATION,   // The location where the frame buffer will be allocated
-      .grab_mode = CAMERA_GRAB_LATEST,            // When buffers should be filled
-#if CONFIG_CAMERA_CONVERTER_ENABLED
-      conv_mode = CONV_DISABLE, // RGB<->YUV Conversion mode
-#endif
-      .sccb_i2c_port = SCCB_I2C_PORT // If pin_sccb_sda is -1, use the already configured I2C bus by number
-  };
 
-  return cam.init(camera_config);
+  // Set frame duration
+  rtsp_server.set_frame_interval(param_frame_duration.value());
+  // initialize the camera with the current configuration
+  return camera.initialize(frame_size, jpeg_quality);
 }
 
 void update_camera_settings()
 {
+  // (Re)initialize the camera with the current configuration. This is called
+  // at startup (after the config is loaded) and whenever the config is saved,
+  // so frame size / JPEG quality / frame duration changes take effect
+  // immediately instead of only after a reboot.
+  if (camera_init_result == ESP_OK)
+    esp_camera_deinit(); // re-init applies a new frame size / quality
+
+  for (auto i = 0; i < 3; i++)
+  {
+    log_i("Initializing camera...");
+    camera_init_result = initialize_camera();
+    if (camera_init_result == ESP_OK)
+      break;
+
+    esp_camera_deinit();
+    log_e("Failed to initialize camera. Error: 0x%04x. Frame size: %s, frame rate: %d ms, jpeg quality: %d", camera_init_result, param_frame_size.value(), param_frame_duration.value(), param_jpg_quality.value());
+    delay(500);
+  }
+
   auto camera = esp_camera_sensor_get();
   if (camera == nullptr)
   {
@@ -334,15 +376,17 @@ void update_camera_settings()
 void start_rtsp_server()
 {
   log_v("start_rtsp_server");
-  camera_server = std::unique_ptr<rtsp_server>(new rtsp_server(cam, param_frame_duration.value(), RTSP_PORT));
+
+  rtsp_server.begin();
   // Add RTSP service to mDNS
   // HTTP is already set by iotWebConf
-  MDNS.addService("rtsp", "tcp", RTSP_PORT);
+  MDNS.addService("rtsp", "tcp", rtsp_server.get_rtsp_port());
 }
 
 void on_connected()
 {
   log_v("on_connected");
+
   // Start the RTSP Server if initialized
   if (camera_init_result == ESP_OK)
     start_rtsp_server();
@@ -354,6 +398,82 @@ void on_config_saved()
 {
   log_v("on_config_saved");
   update_camera_settings();
+  // Apply the RTSP authentication credentials immediately, so a changed
+  // username/password takes effect for new clients without a reboot.
+  // Existing sessions keep their previous credentials; only new connections
+  // are affected.
+  rtsp_server.set_credentials(param_auth_user.value(), param_auth_pass.value());
+}
+
+bool is_authenticated()
+{
+  // If no username is configured, authentication is disabled.
+  if (param_auth_user.value()[0] == '\0')
+    return true;
+
+  // If the client has already authenticated, return true.
+  if (web_server.authenticate(param_auth_user.value(), param_auth_pass.value()))
+    return true;
+
+  // Otherwise, request authentication.
+  web_server.requestAuthentication(BASIC_AUTH, DEFAULT_WWW_REALM);
+  return false;
+}
+
+// --- Over-the-air (OTA) firmware updates ---------------------------------------
+//
+// Firmware is updated over WiFi with the ArduinoOTA / espota protocol (port 3232),
+// used by PlatformIO (`pio run -t upload --upload-protocol espota`) and the
+// Arduino IDE. This requires a partition table with two app slots
+// (see partitions/ota.csv); 8MB/16MB boards already ship one.
+
+void setup_ota()
+{
+  log_v("setup_ota");
+
+  const esp_partition_t *ota_partition = esp_ota_get_next_update_partition(nullptr);
+  if (ota_partition == nullptr)
+    log_w("OTA NOT available: single app slot - re-flash this build once over USB to install the OTA partition table (partitions/ota.csv)");
+  else
+    log_i("OTA supported: next OTA partition '%s' @ 0x%x, size 0x%x", ota_partition->label, ota_partition->address, ota_partition->size);
+
+  // Network OTA via the espota protocol (port 3232), which allows PlatformIO / Arduino IDE to push new firmware over WiFi.
+  ArduinoOTA.setHostname(thingName.c_str());
+  ArduinoOTA.setPassword(OTA_PASSWORD);
+  ArduinoOTA
+      .onStart([]()
+               { 
+      // Free memory for the update: stop the RTSP server and release the camera frame buffers, so Update.write() has all the heap it needs
+      // On a successful update the device reboots; onError() restores these.
+      rtsp_server.end();
+      if (camera_init_result == ESP_OK)
+      {
+        esp_camera_deinit();
+        camera_init_result = ESP_FAIL;
+      } })
+      .onEnd([]()
+             { log_w("OTA update finished"); })
+      .onProgress([](unsigned int progress, unsigned int total)
+                  { log_i("OTA progress: %u%%", (progress * 100) / total); })
+      .onError([](ota_error_t error)
+               {
+      switch (error)
+      {
+      case OTA_AUTH_ERROR: log_e("OTA: authentication failed"); break;
+      case OTA_BEGIN_ERROR: log_e("OTA: begin failed - %s", Update.errorString()); break;
+      case OTA_CONNECT_ERROR: log_e("OTA: connect-back to the client FAILED (check the PC firewall for the host_port)"); break;
+      case OTA_RECEIVE_ERROR: log_e("OTA: receive failed"); break;
+      case OTA_END_ERROR: log_e("OTA: end failed - %s", Update.errorString()); break;
+      default: log_e("OTA error: %u", error);
+      }
+      // Restore the camera and RTSP server after a failed update (on success the
+      // device reboots, so no restore is needed there).
+      update_camera_settings();
+      if (iotWebConf.getState() == iotwebconf::NetworkState::OnLine)
+        start_rtsp_server(); });
+
+  ArduinoOTA.begin();
+  log_i("ArduinoOTA (espota) service started");
 }
 
 void setup()
@@ -361,6 +481,8 @@ void setup()
   // Disable brownout
   WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0);
 
+  Serial.begin(115200);
+  Serial.setDebugOutput(true);
 #ifdef CAMERA_POWER_GPIO
   pinMode(CAMERA_POWER_GPIO, OUTPUT);
   digitalWrite(CAMERA_POWER_GPIO, CAMERA_POWER_ON_LEVEL);
@@ -371,8 +493,13 @@ void setup()
   digitalWrite(USER_LED_GPIO, !USER_LED_ON_LEVEL);
 #endif
 
-  Serial.begin(115200);
-  Serial.setDebugOutput(true);
+#ifdef FLASH_LED_GPIO
+  pinMode(FLASH_LED_GPIO, OUTPUT);
+  // Set resolution to 8 bits
+  analogWriteResolution(8);
+  // Turn flash led off
+  analogWrite(FLASH_LED_GPIO, 0);
+#endif
 
 #ifdef ARDUINO_USB_CDC_ON_BOOT
   // Delay for USB to connect/settle
@@ -389,11 +516,19 @@ void setup()
   if (CAMERA_CONFIG_FB_LOCATION == CAMERA_FB_IN_PSRAM && !psramInit())
     log_e("Failed to initialize PSRAM");
 
-  // [addition] Adding the network configuration group to the parameters
-  param_config_group.addItem(&param_ip_address);
-  param_config_group.addItem(&param_gateway);
-  param_config_group.addItem(&param_mask);
-  iotWebConf.addParameterGroup(&param_config_group);
+#ifdef MIC_I2S_BCLK
+  if (!audio.begin())
+    log_e("Failed to initialize the I2S microphone");
+#endif
+
+  WiFi.setSleep(false);
+
+#ifdef MICRO_RTSP_ENABLE_SRTP
+  // Stream video over Secure RTP (RFC 3711), negotiated with "a=crypto"
+  // (RFC 4568) in the DESCRIBE/SETUP replies.
+  server.set_srtp(true);
+  log_i("SRTP enabled");
+#endif
 
   param_group_camera.addItem(&param_frame_duration);
   param_group_camera.addItem(&param_frame_size);
@@ -422,51 +557,91 @@ void setup()
   param_group_camera.addItem(&param_colorbar);
   iotWebConf.addParameterGroup(&param_group_camera);
 
+  // IP configurations
+  param_config_group.addItem(&param_ip_address);
+  param_config_group.addItem(&param_gateway);
+  param_config_group.addItem(&param_mask);
+  iotWebConf.addParameterGroup(&param_config_group);
+
+  // RTSP Basic authentication credentials (RFC 2617), also used to protect /config.
+  param_group_auth.addItem(&param_auth_user);
+  param_group_auth.addItem(&param_auth_pass);
+  iotWebConf.addParameterGroup(&param_group_auth);
+
   iotWebConf.getApTimeoutParameter()->visible = true;
   iotWebConf.setConfigSavedCallback(on_config_saved);
   iotWebConf.setWifiConnectionCallback(on_connected);
 #ifdef USER_LED_GPIO
   iotWebConf.setStatusPin(USER_LED_GPIO, USER_LED_ON_LEVEL);
 #endif
-  // [addition] Pass the network configuration to the iotWebConf. 
   iotWebConf.setWifiConnectionHandler(staticIPHandle);
   iotWebConf.init();
   readConfigFile();
 
-  // Try to initialize 3 times
-  for (auto i = 0; i < 3; i++)
-  {
-    camera_init_result = initialize_camera();
-    if (camera_init_result == ESP_OK)
-    {
-      update_camera_settings();
-      break;
-    }
+  // Set the time servers
+  configTime(0, 0, NTP_SERVERS);
 
-    esp_camera_deinit();
-    log_e("Failed to initialize camera. Error: 0x%0x. Frame size: %s, frame rate: %d ms, jpeg quality: %d", camera_init_result, param_frame_size.value(), param_frame_duration.value(), param_jpg_quality.value());
-    delay(500);
-  }
+  // Initialize the camera with the now-loaded configuration and apply the
+  // sensor settings. update_camera_settings() is also called on config save,
+  // so a changed frame size / quality takes effect immediately.
+  update_camera_settings();
+
+  // Apply RTSP Basic authentication credentials (RFC 2617); empty username disables it.
+  rtsp_server.set_credentials(param_auth_user.value(), param_auth_pass.value());
 
   // Set up required URL handlers on the web server
   web_server.on("/", HTTP_GET, handle_root);
-  web_server.on("/config", []
-                { iotWebConf.handleConfig(); });
+  web_server.on("/config", []()
+                {
+                  // IotWebConf handles the captive portal and config page, including authentication!
+                  // username: admin, password: AP password you set in the config portal
+                  // Registered without a method so BOTH GET (open the page) and
+                  // POST (form submit -> iotSave) are handled.
+                    iotWebConf.handleConfig(); });
   // Camera snapshot
-  web_server.on("/snapshot", HTTP_GET, handle_snapshot);
+  web_server.on("/snapshot", HTTP_GET, []()
+                {
+                  if (is_authenticated())
+                    handle_snapshot(); });
   // Camera stream
-  web_server.on("/stream", HTTP_GET, handle_stream);
-
+  web_server.on("/stream", HTTP_GET, []()
+                {
+                  if (is_authenticated())
+                    handle_stream(); });
+#ifdef FLASH_LED_GPIO
+  // Flash led
+  web_server.on("/flash", HTTP_GET, []()
+                {
+                  if (is_authenticated())
+                    handle_flash(); });
+#endif
+  // ESP restart
+  web_server.on("/restart", HTTP_GET, []()
+                {
+                  if (is_authenticated())
+                    handle_restart(); });
   web_server.onNotFound([]()
                         { iotWebConf.handleNotFound(); });
+
+  // Start the ArduinoOTA (espota) service for network firmware uploads.
+  setup_ota();
 }
 
 void loop()
 {
   iotWebConf.doLoop();
+  rtsp_server.loop();
+  ArduinoOTA.handle();
 
-  if (camera_server)
-    camera_server->doLoop();
+  // OTA diagnostics: once an update is running, log progress + heap so the
+  // serial monitor shows whether the firmware stream is actually arriving.
+  // (Nothing logged here means Update.begin() never started - see onError.)
+  static unsigned long last_ota_log = 0;
+  if (Update.isRunning() && millis() - last_ota_log >= 2000)
+  {
+    last_ota_log = millis();
+    log_i("OTA receiving: %u / %u bytes, free heap %u", Update.progress(), Update.size(), ESP.getFreeHeap());
+  }
 }
 
 void staticIPHandle(const char *ssid, const char *password)
@@ -474,10 +649,9 @@ void staticIPHandle(const char *ssid, const char *password)
   IPAddress local_IP;
   IPAddress gateway;
   IPAddress subnet;
-  local_IP.fromString(param_ip_address.valueBuffer);
-  gateway.fromString(param_gateway.valueBuffer);
-  subnet.fromString(param_mask.valueBuffer);
-
+  local_IP.fromString(param_ip_address.value());
+  gateway.fromString(param_gateway.value());
+  subnet.fromString(param_mask.value());
   // WiFi connection
   WiFi.begin(ssid, password);
   WiFi.config(local_IP, gateway, subnet);
@@ -486,10 +660,10 @@ void staticIPHandle(const char *ssid, const char *password)
 void readConfigFile()
 {
   LittleFS.begin();
-  File configFile = LittleFS.open(REXBACK_JSON, "r");
+  File configFile = LittleFS.open(CONFIGURATION_JSON, "r");
   if (configFile)
   {
-    Serial.println(F("Reading config file"));
+    Serial.println("Reading config file");
     StaticJsonDocument<JSON_FILE_MAX_SIZE> doc;
 
     DeserializationError error = deserializeJson(doc, configFile);
@@ -497,7 +671,7 @@ void readConfigFile()
 
     if (error)
     {
-      Serial.println(F("Failed to read file, using default configuration"));
+      Serial.println("Failed to read file, using default configuration");
       return;
     }
     JsonObject documentRoot = doc.as<JsonObject>();
@@ -507,7 +681,7 @@ void readConfigFile()
     iotWebConf.saveConfig();
 
     // -- Remove file after finished loading it.
-    LittleFS.remove(REXBACK_JSON);
+    LittleFS.remove(CONFIGURATION_JSON);
   }
   else
   {
